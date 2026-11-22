@@ -59,4 +59,13 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
 console.log("Downloader UZ server ishga tushdi: " + PORT);
 });
-console.log("TOKEN BOR:", !!process.env.TELEGRAM_BOT_TOKEN);
+const check = await fetch(
+  "https://api.telegram.org/bot" +
+  process.env.TELEGRAM_BOT_TOKEN +
+  "/getMe"
+);
+
+const result = await check.json();
+
+console.log("TELEGRAM TEKSHIRUVI:", result.ok);
+console.log("TELEGRAM XATOSI:", result.description || "Xato yo'q");
