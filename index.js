@@ -53,17 +53,20 @@ console.log(error);
 res.sendStatus(200);
 }
 });
+const webhookUrl =
+  "https://downloader-uz-bot.onrendex.com/webhook";
 
-const PORT = process.env.PORT || 3000;
-
-app.listen(PORT, () => {
-console.log("Downloader UZ server ishga tushdi: " + PORT);
-});
-const check = await fetch(
+const response = await fetch(
   "https://api.telegram.org/bot" +
   process.env.TELEGRAM_BOT_TOKEN +
-  "/getMe"
+  "/setWebhook?url=" +
+  encodeURIComponent(webhookUrl)
 );
+
+const result = await response.json();
+
+console.log("WEBHOOK:", result.ok);
+console.log("WEBHOOK XABARI:", result.description);
 
 const result = await check.json();
 
