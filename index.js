@@ -23,9 +23,9 @@ const text = message.text;
 let reply = "Video havolasini yuboring.";
 
 if (text === "/start") {
-reply = "👋 Downloader UZ botiga xush kelibsiz!\n\nYouTube, Instagram, TikTok, Facebook yoki Telegram havolasini yuboring.";
+reply = "👋 Downloader UZ botiga xush kelibsiz!\n\nVideo havolasini yuboring.";
 } else if (text.startsWith("http")) {
-reply = "✅ Havola qabul qilindi!\n\nHozircha yuklab olish funksiyasi ulanmagan.";
+reply = "✅ Havola qabul qilindi! Yuklab olish funksiyasi hali ulanmagan.";
 }
 
 try {
@@ -45,6 +45,7 @@ res.sendStatus(200);
 });
 
 const PORT = process.env.PORT || 3000;
+
 app.listen(PORT, () => {
 console.log("Downloader UZ server ishga tushdi:", PORT);
 });
