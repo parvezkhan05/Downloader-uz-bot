@@ -59,3 +59,4 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
 console.log("Downloader UZ server ishga tushdi: " + PORT);
 });
+console.log("TOKEN BOR:", !!process.env.TELEGRAM_BOT_TOKEN);
