@@ -1,8 +1,10 @@
 import express from "express";
 
 const app = express();
-
 app.use(express.json());
+
+const TOKEN = process.env.TELEGRAM_BOT_TOKEN;
+const PORT = process.env.PORT || 3000;
 
 app.get("/", (req, res) => {
 res.send("Downloader UZ BOT ishlayapti!");
@@ -24,17 +26,11 @@ let reply = "Video havolasini yuboring.";
 if (userText === "/start") {
   reply = "Salom! Downloader UZ botiga xush kelibsiz!";
 } else if (userText.startsWith("http")) {
-  reply = "Havola qabul qilindi. Yuklab olish funksiyasi hali ulanmagan.";
+  reply = "Havola qabul qilindi!";
 }
 
-const token = process.env.TELEGRAM_BOT_TOKEN;
-
-if (!token) {
-  console.log("Bot tokeni topilmadi!");
-  return res.sendStatus(200);
-}
-
-const telegramUrl = "https://api.telegram.org/bot" + token + "/sendMessage";
+const telegramUrl =
+  "https://api.telegram.org/bot" + TOKEN + "/sendMessage";
 
 await fetch(telegramUrl, {
   method: "POST",
@@ -53,22 +49,33 @@ console.log(error);
 res.sendStatus(200);
 }
 });
-const webhookUrl =
-  "https://downloader-uz-bot.onrendex.com/webhook";
+
+async function setupWebhook() {
+if (!TOKEN) {
+console.log("TOKEN TOPILMADI");
+return;
+}
 
 const response = await fetch(
-  "https://api.telegram.org/bot" +
-  process.env.TELEGRAM_BOT_TOKEN +
-  "/setWebhook?url=" +
-  encodeURIComponent(webhookUrl)
+"https://api.telegram.org/bot" + TOKEN + "/setWebhook",
+{
+method: "POST",
+headers: {
+"Content-Type": "application/json"
+},
+body: JSON.stringify({
+url: "https://downloader-uz-bot.onrendex.com/webhook"
+})
+}
 );
 
 const result = await response.json();
 
 console.log("WEBHOOK:", result.ok);
 console.log("WEBHOOK XABARI:", result.description);
+}
 
-const result = await check.json();
-
-console.log("TELEGRAM TEKSHIRUVI:", result.ok);
-console.log("TELEGRAM XATOSI:", result.description || "Xato yo'q");
+app.listen(PORT, () => {
+console.log("Downloader UZ server ishga tushdi:", PORT);
+setupWebhook().catch(console.error);
+});
