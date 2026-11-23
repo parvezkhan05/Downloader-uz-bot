@@ -2,7 +2,7 @@ import express from "express";
 import youtubedl from "youtube-dl-exec";
 import ffmpegStatic from "ffmpeg-static";
 import sharp from "sharp";
-import { mkdtemp, readdir, rm, stat, readFile } from "node:fs/promises";
+import { mkdtemp, readdir, rm, stat, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -12,6 +12,7 @@ const TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const PORT = process.env.PORT || 3000;
 const MAX_FILE_BYTES = 49 * 1024 * 1024;
 const MAX_PARALLEL_DOWNLOADS = 2;
+const YOUTUBE_COOKIES = process.env.YOUTUBE_COOKIES?.trim();
 let activeDownloads = 0;
 let welcomePng;
 const TELEGRAM_API = "https://api.telegram.org/bot" + TOKEN;
@@ -94,6 +95,13 @@ async function downloadAndSend(chatId, url) {
     const showAnimation = () => telegram("sendChatAction", { chat_id: chatId, action: "upload_video" }).catch(() => {});
     await showAnimation();
     actionTimer = setInterval(showAnimation, 4000);
+    const host = new URL(url).hostname.toLowerCase();
+    const isYouTube = host === "youtu.be" || host.endsWith("youtube.com") || host === "youtube-nocookie.com";
+    let cookiesPath;
+    if (YOUTUBE_COOKIES && isYouTube) {
+      cookiesPath = path.join(workDir, "youtube-cookies.txt");
+      await writeFile(cookiesPath, YOUTUBE_COOKIES + "\n", { mode: 0o600 });
+    }
     await youtubedl.exec(url, {
       output: path.join(workDir, "video.%(ext)s"),
       format: "bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720][ext=mp4]/best[ext=mp4]/best",
@@ -102,6 +110,7 @@ async function downloadAndSend(chatId, url) {
       noWarnings: true,
       noProgress: true,
       remoteComponents: "ejs:github",
+      ...(cookiesPath ? { cookies: cookiesPath } : {}),
       retries: 2,
       socketTimeout: 30,
       ...(ffmpegStatic ? { ffmpegLocation: ffmpegStatic } : {})
