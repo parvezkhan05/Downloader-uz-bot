@@ -251,20 +251,20 @@ async function searchMusic(chatId, query) {
   try {
     await sendText(chatId, `🔎 “${cleanQuery}” bo‘yicha musiqa qidiryapman...`);
     const cookiesPath = await writeYouTubeCookies(workDir);
-    const result = await youtubedl.exec(`ytsearch5:${cleanQuery}`, musicSearchOptions(cookiesPath), { timeout: 60000 });
+    const result = await youtubedl.exec(`ytsearch9:${cleanQuery}`, musicSearchOptions(cookiesPath), { timeout: 60000 });
     const data = JSON.parse(result.stdout || "{}");
-    const entries = (data.entries || []).filter((entry) => entry?.id && /^[\w-]{6,20}$/.test(entry.id)).slice(0, 5);
+    const entries = (data.entries || []).filter((entry) => entry?.id && /^[\w-]{6,20}$/.test(entry.id)).slice(0, 9);
     if (!entries.length) {
       await sendText(chatId, "Bu nom bo‘yicha musiqa topilmadi. Boshqa nom bilan qidirib ko‘ring.");
       return;
     }
 
-    const inline_keyboard = entries.map((entry) => {
+    const inline_keyboard = entries.map((entry, index) => {
       const duration = Number.isFinite(Number(entry.duration)) ? ` · ${formatDuration(Number(entry.duration))}` : "";
-      const title = String(entry.title || "Nomi topilmadi").replace(/\s+/g, " ").slice(0, 52);
-      return [{ text: `🎵 ${title}${duration}`.slice(0, 64), callback_data: `music:${entry.id}` }];
+      const title = String(entry.title || "Nomi topilmadi").replace(/\s+/g, " ").slice(0, 46);
+      return [{ text: `${index + 1}. 🎵 ${title}${duration}`.slice(0, 64), callback_data: `music:${entry.id}` }];
     });
-    await sendText(chatId, "🎧 Natijalardan birini tanlang:", { reply_markup: { inline_keyboard } });
+    await sendText(chatId, "🎧 Topilgan 9 tagacha natijadan keraklisini tanlang:", { reply_markup: { inline_keyboard } });
   } catch (error) {
     console.error("Music search failed:", String(error.stderr || error.message || "unknown").slice(0, 400));
     await sendText(chatId, "Musiqa qidiruvi hozir ishlamadi. Birozdan keyin yana urinib ko‘ring.");
