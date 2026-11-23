@@ -143,11 +143,31 @@ async function downloadAndSend(chatId, url) {
     const result = await response.json();
     if (!response.ok || !result.ok) throw new Error(result.description || "Telegram videoni yubora olmadi");
   } catch (error) {
-    const detail = error.stderr && YOUTUBE_COOKIES
-      ? "Downloader output hidden because YOUTUBE_COOKIES is set."
-      : (error.stderr || error.message || String(error));
-    console.error("Video download failed:", String(detail).slice(-1600));
-    await sendText(chatId, "Videoni yuklab bo‘lmadi. Havola ochiq ekanini tekshirib, qayta urinib ko‘ring.");
+    const output = String(error.stderr || error.message || "").toLowerCase();
+    let failureCode = "unknown";
+    let failureMessage = "Videoni yuklab bo‘lmadi. Birozdan keyin qayta urinib ko‘ring.";
+    if (/does not look like a netscape|invalid length|cookie file/.test(output)) {
+      failureCode = "cookie_format";
+      failureMessage = "YouTube cookie fayli yaroqsiz. Render’dagi YOUTUBE_COOKIES qiymatiga cookies.txt ichidagi to‘liq matnni qo‘ying.";
+    } else if (/sign in to confirm|confirm.*not a bot|not a bot|login required/.test(output)) {
+      failureCode = "youtube_auth";
+      failureMessage = "YouTube botdan kirishni tasdiqlashni so‘radi. YouTube’dan cookie’ni qayta eksport qilib Render’ga yangilang.";
+    } else if (/http error 403|403 forbidden|forbidden/.test(output)) {
+      failureCode = "youtube_403";
+      failureMessage = "YouTube bu serverdan yuklashni rad etdi (403). Keyinroq qayta urinib ko‘ring.";
+    } else if (/http error 429|too many requests/.test(output)) {
+      failureCode = "youtube_rate_limit";
+      failureMessage = "YouTube so‘rovlarni vaqtincha chekladi. Biroz kutib, qayta urinib ko‘ring.";
+    } else if (/requested format.*not available|format not available/.test(output)) {
+      failureCode = "format_unavailable";
+      failureMessage = "Bu Shorts uchun mos video formati topilmadi.";
+    } else if (/private video|video unavailable|members.only|age.restricted|not available in your country/.test(output)) {
+      failureCode = "video_unavailable";
+      failureMessage = "Bu video bot uchun ochiq emas yoki hudud/akkaunt cheklovi bor.";
+    }
+    console.error("Video download failed; code:", failureCode);
+    await sendText(chatId, failureMessage);
+
   } finally {
     clearInterval(actionTimer);
     await rm(workDir, { recursive: true, force: true }).catch(() => {});
