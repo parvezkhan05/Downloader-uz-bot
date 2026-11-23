@@ -294,9 +294,9 @@ async function downloadAndSendMusic(chatId, videoId, title) {
     await showAnimation();
     actionTimer = setInterval(showAnimation, 4000);
     const cookiesPath = await writeYouTubeCookies(workDir);
-    await youtubedl.exec(`https://www.youtube.com/watch?v=${videoId}`, {
+    const sourceUrl = `https://www.youtube.com/watch?v=${videoId}`;
+    const baseOptions = {
       output: path.join(workDir, "audio.%(ext)s"),
-      format: "bestaudio/best",
       extractAudio: true,
       audioFormat: "mp3",
       audioQuality: 0,
@@ -304,13 +304,36 @@ async function downloadAndSendMusic(chatId, videoId, title) {
       noWarnings: true,
       noProgress: true,
       remoteComponents: "ejs:github",
-      ...(cookiesPath ? { cookies: cookiesPath } : {}),
       retries: 2,
       socketTimeout: 30,
       ...(ffmpegStatic ? { ffmpegLocation: ffmpegStatic } : {})
-    }, { timeout: 180000 });
+    };
+    const attempts = [
+      { name: "best audio", format: "bestaudio/best", cookies: Boolean(cookiesPath) },
+      { name: "best available", format: "best", cookies: false },
+      { name: "web audio", format: "bestaudio/best", cookies: false, extractorArgs: "youtube:player-client=web" },
+      { name: "android audio", format: "bestaudio/best", cookies: false, extractorArgs: "youtube:player-client=android" },
+      { name: "ios audio", format: "bestaudio/best", cookies: false, extractorArgs: "youtube:player-client=ios" }
+    ];
+    let downloadError;
+    for (const attempt of attempts) {
+      try {
+        await youtubedl.exec(sourceUrl, {
+          ...baseOptions,
+          format: attempt.format,
+          ...(attempt.cookies && cookiesPath ? { cookies: cookiesPath } : {}),
+          ...(attempt.extractorArgs ? { extractorArgs: attempt.extractorArgs } : {})
+        }, { timeout: 90000 });
+        downloadError = undefined;
+        break;
+      } catch (error) {
+        downloadError = error;
+        console.warn(`Music download retry (${attempt.name}) failed:`, String(error.stderr || error.message || "unknown").slice(0, 240));
+      }
+    }
+    if (downloadError) throw downloadError;
 
-    const files = (await readdir(workDir)).filter((name) => name.startsWith("audio."));
+    const files = (await readdir(workDir)).filter((name) => name.startsWith("audio.") && !name.endsWith(".part") && !name.endsWith(".ytdl"));
     if (!files.length) throw new Error("Yuklangan audio topilmadi");
     const filePath = path.join(workDir, files[0]);
     const fileInfo = await stat(filePath);
@@ -349,7 +372,7 @@ app.post("/webhook", async (req, res) => {
         return;
       }
       const button = callback.message?.reply_markup?.inline_keyboard?.flat().find((item) => item.callback_data === callback.data);
-      const title = String(button?.text || "Tanlangan musiqa").replace(/^🎵\s*/, "").replace(/\s+·\s+\d+:\d{2}$/, "");
+      const title = String(button?.text || "Tanlangan musiqa").replace(/^\d+\.\s*/, "").replace(/^🎵\s*/, "").replace(/\s+·\s+\d+:\d{2}$/, "");
       await telegram("answerCallbackQuery", { callback_query_id: callback.id, text: "Audio tayyorlanyapti..." });
       await downloadAndSendMusic(callback.message.chat.id, match[1], title);
     } catch (error) {
@@ -414,4 +437,3 @@ app.listen(PORT, () => {
   console.log("Downloader UZ server ishga tushdi:", PORT);
   setupWebhook().catch((error) => console.error("Webhook setup failed:", error.message));
 });
-
