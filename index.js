@@ -110,7 +110,7 @@ async function downloadAndSend(chatId, url) {
       cookiesPath = path.join(workDir, "youtube-cookies.txt");
       await writeFile(cookiesPath, YOUTUBE_COOKIES + "\n", { mode: 0o600 });
     }
-    await youtubedl.exec(url, {
+    const downloadOptions = {
       output: path.join(workDir, "video.%(ext)s"),
       format: "bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720][ext=mp4]/best[ext=mp4]/best",
       mergeOutputFormat: "mp4",
@@ -122,7 +122,19 @@ async function downloadAndSend(chatId, url) {
       retries: 2,
       socketTimeout: 30,
       ...(ffmpegStatic ? { ffmpegLocation: ffmpegStatic } : {})
-    }, { timeout: 180000 });
+    };
+    try {
+      await youtubedl.exec(url, downloadOptions, { timeout: 180000 });
+    } catch (error) {
+      const downloaderError = String(error.stderr || error.message || "").toLowerCase();
+      if (!isYouTube || !/requested format.*not available|format not available/.test(downloaderError)) throw error;
+      console.log("YouTube formats unavailable; retrying with web_safari HLS formats.");
+      await youtubedl.exec(url, {
+        ...downloadOptions,
+        format: "best",
+        extractorArgs: "youtube:player-client=web_safari,default"
+      }, { timeout: 180000 });
+    }
 
     const files = (await readdir(workDir)).filter((name) => name.startsWith("video."));
     if (!files.length) throw new Error("Yuklangan video topilmadi");
