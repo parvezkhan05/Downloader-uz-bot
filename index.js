@@ -123,6 +123,7 @@ async function downloadAndSend(chatId, url) {
       socketTimeout: 30,
       ...(ffmpegStatic ? { ffmpegLocation: ffmpegStatic } : {})
     };
+    const { cookies: _cookiesForLoggedInRequest, ...anonymousDownloadOptions } = downloadOptions;
     try {
       await youtubedl.exec(url, downloadOptions, { timeout: 180000 });
     } catch (error) {
@@ -132,16 +133,18 @@ async function downloadAndSend(chatId, url) {
 
       let lastError = error;
       const fallbacks = [
-        { client: "web_safari", extractorArgs: "youtube:player-client=web_safari" },
-        { client: "web_embedded", extractorArgs: "youtube:player-client=web_embedded" },
-        { client: "default", extractorArgs: "youtube:player-client=default" }
+        { client: "web_safari (without cookies)", extractorArgs: "youtube:player-client=web_safari", options: anonymousDownloadOptions },
+        { client: "default (without cookies)", extractorArgs: "youtube:player-client=default", options: anonymousDownloadOptions },
+        { client: "android (without cookies)", extractorArgs: "youtube:player-client=android", options: anonymousDownloadOptions },
+        { client: "ios (without cookies)", extractorArgs: "youtube:player-client=ios", options: anonymousDownloadOptions },
+        { client: "web_embedded (with cookies)", extractorArgs: "youtube:player-client=web_embedded", options: downloadOptions }
       ];
       for (const fallback of fallbacks) {
         try {
           console.log("Retrying YouTube with client:", fallback.client);
           await youtubedl.exec(url, {
-            ...downloadOptions,
-            format: "best[height<=720]/best",
+            ...fallback.options,
+            format: "best",
             extractorArgs: fallback.extractorArgs
           }, { timeout: 180000 });
           lastError = null;
