@@ -112,7 +112,7 @@ async function downloadAndSend(chatId, url) {
     }
     const downloadOptions = {
       output: path.join(workDir, "video.%(ext)s"),
-      format: "bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720][ext=mp4]/best[ext=mp4]/best",
+      format: "best[height<=720]/best",
       mergeOutputFormat: "mp4",
       noPlaylist: true,
       noWarnings: true,
@@ -127,7 +127,7 @@ async function downloadAndSend(chatId, url) {
       await youtubedl.exec(url, downloadOptions, { timeout: 180000 });
     } catch (error) {
       const downloaderError = String(error.stderr || error.message || "").toLowerCase();
-      if (!isYouTube || !/requested format.*not available|format not available/.test(downloaderError)) throw error;
+      if (!isYouTube || !/requested format.*not available|format not available|no video formats found/.test(downloaderError)) throw error;
       console.log("YouTube formats unavailable; retrying with web_safari HLS formats.");
       await youtubedl.exec(url, {
         ...downloadOptions,
