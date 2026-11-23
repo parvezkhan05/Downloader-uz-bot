@@ -69,6 +69,11 @@ function isAllowedVideoUrl(rawUrl) {
   } catch { return false; }
 }
 
+function isNetscapeCookieFile(contents) {
+  const normalized = contents.replace(/^\uFEFF/, "").trimStart();
+  return /^(# Netscape HTTP Cookie File|# HTTP Cookie File)\b/.test(normalized);
+}
+
 function extractUrl(text) {
   const match = text.match(/https?:\/\/[^\s<>]+/i);
   return match ? match[0].replace(/[),.!?]+$/, "") : null;
@@ -99,6 +104,9 @@ async function downloadAndSend(chatId, url) {
     const isYouTube = host === "youtu.be" || host.endsWith("youtube.com") || host === "youtube-nocookie.com";
     let cookiesPath;
     if (YOUTUBE_COOKIES && isYouTube) {
+      if (!isNetscapeCookieFile(YOUTUBE_COOKIES)) {
+        throw new Error("YOUTUBE_COOKIES must contain the full Netscape-format cookie file.");
+      }
       cookiesPath = path.join(workDir, "youtube-cookies.txt");
       await writeFile(cookiesPath, YOUTUBE_COOKIES + "\n", { mode: 0o600 });
     }
@@ -135,7 +143,9 @@ async function downloadAndSend(chatId, url) {
     const result = await response.json();
     if (!response.ok || !result.ok) throw new Error(result.description || "Telegram videoni yubora olmadi");
   } catch (error) {
-    const detail = error.stderr || error.message || String(error);
+    const detail = error.stderr && YOUTUBE_COOKIES
+      ? "Downloader output hidden because YOUTUBE_COOKIES is set."
+      : (error.stderr || error.message || String(error));
     console.error("Video download failed:", String(detail).slice(-1600));
     await sendText(chatId, "Videoni yuklab bo‘lmadi. Havola ochiq ekanini tekshirib, qayta urinib ko‘ring.");
   } finally {
