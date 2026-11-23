@@ -112,7 +112,7 @@ async function downloadAndSend(chatId, url) {
     }
     const downloadOptions = {
       output: path.join(workDir, "video.%(ext)s"),
-      format: "best[height<=720]/best",
+      format: isYouTube ? "best[height<=720]/best" : "bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720][ext=mp4]/best[ext=mp4]/best",
       mergeOutputFormat: "mp4",
       noPlaylist: true,
       noWarnings: true,
@@ -126,14 +126,33 @@ async function downloadAndSend(chatId, url) {
     try {
       await youtubedl.exec(url, downloadOptions, { timeout: 180000 });
     } catch (error) {
-      const downloaderError = String(error.stderr || error.message || "").toLowerCase();
-      if (!isYouTube || !/requested format.*not available|format not available|no video formats found/.test(downloaderError)) throw error;
-      console.log("YouTube formats unavailable; retrying with web_safari HLS formats.");
-      await youtubedl.exec(url, {
-        ...downloadOptions,
-        format: "best",
-        extractorArgs: "youtube:player-client=web_safari,default"
-      }, { timeout: 180000 });
+      const firstError = String(error.stderr || error.message || "").toLowerCase();
+      const noFormats = /requested format.*not available|format not available|no video formats found/.test(firstError);
+      if (!isYouTube || !noFormats) throw error;
+
+      let lastError = error;
+      const fallbacks = [
+        { client: "web_safari", extractorArgs: "youtube:player-client=web_safari" },
+        { client: "web_embedded", extractorArgs: "youtube:player-client=web_embedded" },
+        { client: "default", extractorArgs: "youtube:player-client=default" }
+      ];
+      for (const fallback of fallbacks) {
+        try {
+          console.log("Retrying YouTube with client:", fallback.client);
+          await youtubedl.exec(url, {
+            ...downloadOptions,
+            format: "best[height<=720]/best",
+            extractorArgs: fallback.extractorArgs
+          }, { timeout: 180000 });
+          lastError = null;
+          break;
+        } catch (retryError) {
+          lastError = retryError;
+          const retryOutput = String(retryError.stderr || retryError.message || "").toLowerCase();
+          if (!/requested format.*not available|format not available|no video formats found/.test(retryOutput)) throw retryError;
+        }
+      }
+      if (lastError) throw lastError;
     }
 
     const files = (await readdir(workDir)).filter((name) => name.startsWith("video."));
@@ -237,3 +256,4 @@ app.listen(PORT, () => {
   console.log("Downloader UZ server ishga tushdi:", PORT);
   setupWebhook().catch((error) => console.error("Webhook setup failed:", error.message));
 });
+
