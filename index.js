@@ -25,8 +25,8 @@ async function telegram(method, payload) {
   return result.result;
 }
 
-async function sendText(chatId, text) {
-  return telegram("sendMessage", { chat_id: chatId, text });
+async function sendText(chatId, text, options = {}) {
+  return telegram("sendMessage", { chat_id: chatId, text, ...options });
 }
 
 function welcomeSvg() {
@@ -49,7 +49,8 @@ async function sendWelcomePhoto(chatId) {
     welcomePng ||= await sharp(Buffer.from(welcomeSvg())).png().toBuffer();
     const form = new FormData();
     form.set("chat_id", String(chatId));
-    form.set("caption", "🎬 Salom! Video havolasini yuboring — bot uni tayyorlab chatga qaytaradi.");
+    form.set("caption", "🎬 Video havolasini yoki qo‘shiq nomi/ijrochini yuboring. Musiqa qidirish: /music yoki /song");
+    form.set("reply_markup", JSON.stringify({ keyboard: [[{ text: "🎵 Musiqa qidirish" }]], resize_keyboard: true, is_persistent: true }));
     form.set("photo", new Blob([welcomePng], { type: "image/png" }), "downloader-uz.png");
     const response = await fetch(TELEGRAM_API + "/sendPhoto", { method: "POST", body: form });
     const result = await response.json();
@@ -102,14 +103,7 @@ async function downloadAndSend(chatId, url) {
     actionTimer = setInterval(showAnimation, 4000);
     const host = new URL(url).hostname.toLowerCase();
     const isYouTube = host === "youtu.be" || host.endsWith("youtube.com") || host === "youtube-nocookie.com";
-    let cookiesPath;
-    if (YOUTUBE_COOKIES && isYouTube) {
-      if (!isNetscapeCookieFile(YOUTUBE_COOKIES)) {
-        throw new Error("YOUTUBE_COOKIES must contain the full Netscape-format cookie file.");
-      }
-      cookiesPath = path.join(workDir, "youtube-cookies.txt");
-      await writeFile(cookiesPath, YOUTUBE_COOKIES + "\n", { mode: 0o600 });
-    }
+    const cookiesPath = await writeYouTubeCookies(workDir, isYouTube);
     const downloadOptions = {
       output: path.join(workDir, "video.%(ext)s"),
       format: isYouTube ? "best[height<=720]/best" : "bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720][ext=mp4]/best[ext=mp4]/best",
@@ -209,10 +203,161 @@ async function downloadAndSend(chatId, url) {
   }
 }
 
+async function writeYouTubeCookies(workDir, isYouTube = true) {
+  if (!YOUTUBE_COOKIES || !isYouTube) return undefined;
+  if (!isNetscapeCookieFile(YOUTUBE_COOKIES)) {
+    throw new Error("YOUTUBE_COOKIES must contain the full Netscape-format cookie file.");
+  }
+  const cookiesPath = path.join(workDir, "youtube-cookies.txt");
+  await writeFile(cookiesPath, YOUTUBE_COOKIES + "\n", { mode: 0o600 });
+  return cookiesPath;
+}
+
+function musicSearchOptions(cookiesPath) {
+  return {
+    dumpSingleJson: true,
+    flatPlaylist: true,
+    skipDownload: true,
+    noWarnings: true,
+    noProgress: true,
+    remoteComponents: "ejs:github",
+    ...(cookiesPath ? { cookies: cookiesPath } : {})
+  };
+}
+
+function musicQueryFromMessage(text) {
+  const value = (text || "").trim();
+  if (!value) return null;
+  if (value === "🎵 Musiqa qidirish") return "";
+  const command = value.match(/^\/(?:music|song)(?:@\w+)?(?:\s+([\s\S]*))?$/i);
+  if (command) return (command[1] || "").trim();
+  if (value.startsWith("/") || extractUrl(value)) return null;
+  return value;
+}
+
+async function searchMusic(chatId, query) {
+  const cleanQuery = query.trim().slice(0, 150);
+  if (!cleanQuery) {
+    await sendText(chatId, "🎵 Qo‘shiq nomi yoki ijrochini yozing. Masalan: /music Sevara Nazarkhan");
+    return;
+  }
+  if (activeDownloads >= MAX_PARALLEL_DOWNLOADS) {
+    await sendText(chatId, "Hozir boshqa fayllar tayyorlanmoqda. Birozdan keyin qayta qidiring.");
+    return;
+  }
+
+  activeDownloads += 1;
+  const workDir = await mkdtemp(path.join(tmpdir(), "downloader-music-search-"));
+  try {
+    await sendText(chatId, `🔎 “${cleanQuery}” bo‘yicha musiqa qidiryapman...`);
+    const cookiesPath = await writeYouTubeCookies(workDir);
+    const result = await youtubedl.exec(`ytsearch5:${cleanQuery}`, musicSearchOptions(cookiesPath), { timeout: 60000 });
+    const data = JSON.parse(result.stdout || "{}");
+    const entries = (data.entries || []).filter((entry) => entry?.id && /^[\w-]{6,20}$/.test(entry.id)).slice(0, 5);
+    if (!entries.length) {
+      await sendText(chatId, "Bu nom bo‘yicha musiqa topilmadi. Boshqa nom bilan qidirib ko‘ring.");
+      return;
+    }
+
+    const inline_keyboard = entries.map((entry) => {
+      const duration = Number.isFinite(Number(entry.duration)) ? ` · ${formatDuration(Number(entry.duration))}` : "";
+      const title = String(entry.title || "Nomi topilmadi").replace(/\s+/g, " ").slice(0, 52);
+      return [{ text: `🎵 ${title}${duration}`.slice(0, 64), callback_data: `music:${entry.id}` }];
+    });
+    await sendText(chatId, "🎧 Natijalardan birini tanlang:", { reply_markup: { inline_keyboard } });
+  } catch (error) {
+    console.error("Music search failed:", String(error.stderr || error.message || "unknown").slice(0, 400));
+    await sendText(chatId, "Musiqa qidiruvi hozir ishlamadi. Birozdan keyin yana urinib ko‘ring.");
+  } finally {
+    await rm(workDir, { recursive: true, force: true }).catch(() => {});
+    activeDownloads -= 1;
+  }
+}
+
+function formatDuration(seconds) {
+  const minutes = Math.floor(seconds / 60);
+  const remainder = seconds % 60;
+  return `${minutes}:${String(remainder).padStart(2, "0")}`;
+}
+
+async function downloadAndSendMusic(chatId, videoId, title) {
+  if (activeDownloads >= MAX_PARALLEL_DOWNLOADS) {
+    await sendText(chatId, "Hozir boshqa fayllar yuklanmoqda. Birozdan keyin qayta tanlang.");
+    return;
+  }
+  activeDownloads += 1;
+  const workDir = await mkdtemp(path.join(tmpdir(), "downloader-music-"));
+  let actionTimer;
+  try {
+    await sendText(chatId, `🎵 “${title.slice(0, 80)}” audiosi tayyorlanyapti...`);
+    const showAnimation = () => telegram("sendChatAction", { chat_id: chatId, action: "upload_audio" }).catch(() => {});
+    await showAnimation();
+    actionTimer = setInterval(showAnimation, 4000);
+    const cookiesPath = await writeYouTubeCookies(workDir);
+    await youtubedl.exec(`https://www.youtube.com/watch?v=${videoId}`, {
+      output: path.join(workDir, "audio.%(ext)s"),
+      format: "bestaudio/best",
+      extractAudio: true,
+      audioFormat: "mp3",
+      audioQuality: 0,
+      noPlaylist: true,
+      noWarnings: true,
+      noProgress: true,
+      remoteComponents: "ejs:github",
+      ...(cookiesPath ? { cookies: cookiesPath } : {}),
+      retries: 2,
+      socketTimeout: 30,
+      ...(ffmpegStatic ? { ffmpegLocation: ffmpegStatic } : {})
+    }, { timeout: 180000 });
+
+    const files = (await readdir(workDir)).filter((name) => name.startsWith("audio."));
+    if (!files.length) throw new Error("Yuklangan audio topilmadi");
+    const filePath = path.join(workDir, files[0]);
+    const fileInfo = await stat(filePath);
+    if (fileInfo.size > MAX_FILE_BYTES) {
+      await sendText(chatId, "Audio Telegram yuborish chegarasidan katta (49 MB).");
+      return;
+    }
+    const form = new FormData();
+    form.set("chat_id", String(chatId));
+    form.set("title", title.slice(0, 64));
+    form.set("audio", new Blob([await readFile(filePath)], { type: "audio/mpeg" }), `${title.replace(/[\\/:*?"<>|]/g, "_").slice(0, 80) || "music"}.mp3`);
+    const response = await fetch(TELEGRAM_API + "/sendAudio", { method: "POST", body: form });
+    const result = await response.json();
+    if (!response.ok || !result.ok) throw new Error(result.description || "Telegram audioni yubora olmadi");
+  } catch (error) {
+    console.error("Music download failed:", String(error.stderr || error.message || "unknown").slice(0, 400));
+    await sendText(chatId, "Bu musiqani olishning imkoni bo‘lmadi. Boshqa natijani tanlab ko‘ring.");
+  } finally {
+    clearInterval(actionTimer);
+    await rm(workDir, { recursive: true, force: true }).catch(() => {});
+    activeDownloads -= 1;
+  }
+}
+
 app.get("/", (req, res) => res.send("Downloader UZ BOT ishlayapti!"));
 
 app.post("/webhook", async (req, res) => {
   res.sendStatus(200);
+  const callback = req.body?.callback_query;
+  if (callback) {
+    if (!TOKEN) return;
+    try {
+      const match = String(callback.data || "").match(/^music:([\w-]{6,20})$/);
+      if (!match) {
+        await telegram("answerCallbackQuery", { callback_query_id: callback.id, text: "Bu natija yaroqsiz." });
+        return;
+      }
+      const button = callback.message?.reply_markup?.inline_keyboard?.flat().find((item) => item.callback_data === callback.data);
+      const title = String(button?.text || "Tanlangan musiqa").replace(/^🎵\s*/, "").replace(/\s+·\s+\d+:\d{2}$/, "");
+      await telegram("answerCallbackQuery", { callback_query_id: callback.id, text: "Audio tayyorlanyapti..." });
+      await downloadAndSendMusic(callback.message.chat.id, match[1], title);
+    } catch (error) {
+      console.error("Music callback failed:", error.message);
+      if (callback.message?.chat?.id) await sendText(callback.message.chat.id, "Musiqani tayyorlab bo‘lmadi. Boshqa natijani tanlang.").catch(() => {});
+    }
+    return;
+  }
   const message = req.body?.message;
   if (!TOKEN || !message) return;
   const chatId = message.chat.id;
@@ -228,6 +373,11 @@ app.post("/webhook", async (req, res) => {
     }
     if (message.document?.mime_type?.startsWith("video/")) {
       await returnTelegramMedia(chatId, message.document, "sendDocument", "document");
+      return;
+    }
+    const musicQuery = musicQueryFromMessage(message.text || "");
+    if (musicQuery !== null) {
+      await searchMusic(chatId, musicQuery);
       return;
     }
     const url = extractUrl(message.text || message.caption || "");
@@ -253,6 +403,11 @@ async function setupWebhook() {
   }
   const result = await telegram("setWebhook", { url: "https://downloader-uz-bot.onrender.com/webhook" });
   console.log("WEBHOOK o‘rnatildi:", Boolean(result));
+  await telegram("setMyCommands", { commands: [
+    { command: "music", description: "Qo‘shiq nomi yoki ijrochini qidirish" },
+    { command: "song", description: "Qo‘shiq nomi bo‘yicha qidirish" },
+    { command: "help", description: "Botdan foydalanish yo‘riqnomasi" }
+  ] });
 }
 
 app.listen(PORT, () => {
