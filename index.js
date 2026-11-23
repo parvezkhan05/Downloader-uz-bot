@@ -333,9 +333,14 @@ async function downloadAndSendMusic(chatId, videoId, title) {
     }
     if (downloadError) throw downloadError;
 
-    const files = (await readdir(workDir)).filter((name) => name.startsWith("audio.") && !name.endsWith(".part") && !name.endsWith(".ytdl"));
+    const files = (await readdir(workDir))
+      .filter((name) => name.startsWith("audio.") && !name.endsWith(".part") && !name.endsWith(".ytdl"))
+      .sort((a, b) => Number(b.endsWith(".mp3")) - Number(a.endsWith(".mp3")));
     if (!files.length) throw new Error("Yuklangan audio topilmadi");
     const filePath = path.join(workDir, files[0]);
+    if (path.extname(filePath).toLowerCase() !== ".mp3") {
+      throw new Error(`Audio MP3 ga o‘girilmagan: ${files[0]}`);
+    }
     const fileInfo = await stat(filePath);
     if (fileInfo.size > MAX_FILE_BYTES) {
       await sendText(chatId, "Audio Telegram yuborish chegarasidan katta (49 MB).");
@@ -347,7 +352,16 @@ async function downloadAndSendMusic(chatId, videoId, title) {
     form.set("audio", new Blob([await readFile(filePath)], { type: "audio/mpeg" }), `${title.replace(/[\\/:*?"<>|]/g, "_").slice(0, 80) || "music"}.mp3`);
     const response = await fetch(TELEGRAM_API + "/sendAudio", { method: "POST", body: form });
     const result = await response.json();
-    if (!response.ok || !result.ok) throw new Error(result.description || "Telegram audioni yubora olmadi");
+    if (!response.ok || !result.ok) {
+      console.warn("Telegram sendAudio rejected MP3, retrying as document:", result.description || response.status);
+      const documentForm = new FormData();
+      documentForm.set("chat_id", String(chatId));
+      documentForm.set("caption", `🎵 ${title.slice(0, 900)}`);
+      documentForm.set("document", new Blob([await readFile(filePath)], { type: "audio/mpeg" }), `${title.replace(/[\\/:*?"<>|]/g, "_").slice(0, 80) || "music"}.mp3`);
+      const documentResponse = await fetch(TELEGRAM_API + "/sendDocument", { method: "POST", body: documentForm });
+      const documentResult = await documentResponse.json();
+      if (!documentResponse.ok || !documentResult.ok) throw new Error(documentResult.description || result.description || "Telegram audio faylni yubora olmadi");
+    }
   } catch (error) {
     console.error("Music download failed:", String(error.stderr || error.message || "unknown").slice(0, 400));
     await sendText(chatId, "Bu musiqani olishning imkoni bo‘lmadi. Boshqa natijani tanlab ko‘ring.");
