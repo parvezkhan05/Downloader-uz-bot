@@ -2,6 +2,7 @@ import express from "express";
 import youtubedl from "youtube-dl-exec";
 import ffmpegStatic from "ffmpeg-static";
 import sharp from "sharp";
+import { randomBytes } from "node:crypto";
 import { mkdtemp, readdir, rm, stat, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -12,9 +13,18 @@ const TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const PORT = process.env.PORT || 3000;
 const MAX_FILE_BYTES = 49 * 1024 * 1024;
 const MAX_PARALLEL_DOWNLOADS = 2;
+const MAX_PARALLEL_SEARCHES = 3;
+const SEARCH_CACHE_MS = 10 * 60 * 1000; // bir xil so‘rov 10 daqiqa keshda turadi
+const SEARCH_SESSION_MS = 30 * 60 * 1000; // "keyingi sahifa" tugmalari 30 daqiqa ishlaydi
+const SEARCH_COOLDOWN_MS = 3000; // bitta foydalanuvchi uchun qidiruvlar orasidagi tanaffus
+const SEARCH_PAGE_SIZE = 9;
 const YOUTUBE_COOKIES = process.env.YOUTUBE_COOKIES?.trim();
 let activeDownloads = 0;
+let activeSearches = 0;
 let welcomePng;
+const searchCache = new Map(); // tozalangan so‘rov -> { time, entries }
+const searchSessions = new Map(); // sessionId -> { time, query, entries }
+const lastSearchAt = new Map(); // chatId -> oxirgi qidiruv vaqti
 const TELEGRAM_API = "https://api.telegram.org/bot" + TOKEN;
 const ALLOWED_HOSTS = ["youtube.com", "youtu.be", "youtube-nocookie.com", "instagram.com", "instagr.am", "tiktok.com", "vm.tiktok.com", "vt.tiktok.com", "facebook.com", "fb.watch", "fb.com", "t.me", "telegram.me", "telesco.pe"];
 
@@ -235,49 +245,184 @@ function musicQueryFromMessage(text) {
   return value;
 }
 
-async function searchMusic(chatId, query) {
-  const cleanQuery = query.trim().slice(0, 150);
-  if (!cleanQuery) {
-    await sendText(chatId, "🎵 Qo‘shiq nomi yoki ijrochini yozing. Masalan: /music Sevara Nazarkhan");
-    return;
-  }
-  if (activeDownloads >= MAX_PARALLEL_DOWNLOADS) {
-    await sendText(chatId, "Hozir boshqa fayllar tayyorlanmoqda. Birozdan keyin qayta qidiring.");
-    return;
-  }
+// ======================= MUSIQA QIDIRISH (yaxshilangan qism) =======================
 
-  activeDownloads += 1;
-  const workDir = await mkdtemp(path.join(tmpdir(), "downloader-music-search-"));
-  try {
-    await sendText(chatId, `🔎 “${cleanQuery}” bo‘yicha musiqa qidiryapman...`);
-    const cookiesPath = await writeYouTubeCookies(workDir);
-    const result = await youtubedl.exec(`ytsearch9:${cleanQuery}`, musicSearchOptions(cookiesPath), { timeout: 60000 });
-    const data = JSON.parse(result.stdout || "{}");
-    const entries = (data.entries || []).filter((entry) => entry?.id && /^[\w-]{6,20}$/.test(entry.id)).slice(0, 9);
-    if (!entries.length) {
-      await sendText(chatId, "Bu nom bo‘yicha musiqa topilmadi. Boshqa nom bilan qidirib ko‘ring.");
-      return;
-    }
+// Qidiruvga foyda keltirmaydigan so‘zlar ("official", "lyrics", "skachat" va h.k.)
+const NOISE_WORDS = new Set(["official", "video", "lyrics", "audio", "hd", "4k", "mp3", "скачать", "skachat", "yuklab", "olish"]);
 
-    const inline_keyboard = entries.map((entry, index) => {
-      const duration = Number.isFinite(Number(entry.duration)) ? ` · ${formatDuration(Number(entry.duration))}` : "";
-      const title = String(entry.title || "Nomi topilmadi").replace(/\s+/g, " ").slice(0, 46);
-      return [{ text: `${index + 1}. 🎵 ${title}${duration}`.slice(0, 64), callback_data: `music:${entry.id}` }];
-    });
-    await sendText(chatId, "🎧 Topilgan 9 tagacha natijadan keraklisini tanlang:", { reply_markup: { inline_keyboard } });
-  } catch (error) {
-    console.error("Music search failed:", String(error.stderr || error.message || "unknown").slice(0, 400));
-    await sendText(chatId, "Musiqa qidiruvi hozir ishlamadi. Birozdan keyin yana urinib ko‘ring.");
-  } finally {
-    await rm(workDir, { recursive: true, force: true }).catch(() => {});
-    activeDownloads -= 1;
-  }
-}
+// Sarlavhada bo‘lsa, natijani pastga tushiradigan so‘zlar (agar foydalanuvchi o‘zi so‘ramagan bo‘lsa)
+const PENALTY_WORDS = ["karaoke", "reaction", "slowed", "nightcore", "sped up", "8d", "remix", "cover", "live", "concert", "instrumental", "minus", "shorts", "full album", "mix", "playlist", "compilation"];
 
 function formatDuration(seconds) {
   const minutes = Math.floor(seconds / 60);
   const remainder = seconds % 60;
   return `${minutes}:${String(remainder).padStart(2, "0")}`;
+}
+
+function cleanMusicQuery(query) {
+  const words = query
+    .replace(/[(\[][^)\]]*[)\]]/g, " ")
+    .split(/\s+/)
+    .filter((word) => word && !NOISE_WORDS.has(word.toLowerCase()));
+  return words.join(" ").trim() || query.trim();
+}
+
+function scoreMusicEntry(entry, rawQuery, queryWords) {
+  const title = String(entry.title || "").toLowerCase();
+  const channel = String(entry.channel || entry.uploader || "").toLowerCase();
+  const query = rawQuery.toLowerCase();
+  let score = 0;
+
+  const duration = Number(entry.duration);
+  if (Number.isFinite(duration) && duration > 0) {
+    if (duration < 60) score -= 40; // Shorts yoki parcha
+    else if (duration <= 480) score += 15; // oddiy qo‘shiq uzunligi
+    else if (duration > 900) score -= 35; // mix, konsert, podkast
+    else score -= 10;
+  }
+
+  if (channel.endsWith("- topic")) score += 30; // YouTube’ning avtomatik "Artist - Topic" kanallari: toza audio
+  if (/official (audio|music video|video)|rasmiy/.test(title)) score += 10;
+  for (const word of PENALTY_WORDS) {
+    if (title.includes(word) && !query.includes(word)) score -= 25;
+  }
+
+  const haystack = title + " " + channel;
+  const hits = queryWords.filter((word) => haystack.includes(word)).length;
+  if (queryWords.length) score += Math.round((hits / queryWords.length) * 40);
+
+  const views = Number(entry.view_count);
+  if (Number.isFinite(views) && views > 0) score += Math.min(15, Math.log10(views) * 2);
+  return score;
+}
+
+function rankMusicEntries(entries, rawQuery, searchTerm) {
+  const queryWords = searchTerm.toLowerCase().split(/\s+/).filter((word) => word.length > 1);
+  const seen = new Set();
+  const unique = entries.filter((entry) => {
+    const key = String(entry.title || "").toLowerCase().replace(/[^\p{L}\p{N}]+/gu, "");
+    if (!key || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+  return unique
+    .map((entry, index) => ({ entry, score: scoreMusicEntry(entry, rawQuery, queryWords) + (unique.length - index) * 0.3 }))
+    .sort((a, b) => b.score - a.score)
+    .map((item) => item.entry);
+}
+
+function musicResultsView(session, sessionId, page) {
+  const pages = Math.max(1, Math.ceil(session.entries.length / SEARCH_PAGE_SIZE));
+  const safePage = Math.min(Math.max(page, 0), pages - 1);
+  const start = safePage * SEARCH_PAGE_SIZE;
+  const slice = session.entries.slice(start, start + SEARCH_PAGE_SIZE);
+
+  const inline_keyboard = slice.map((entry, index) => {
+    const seconds = Number(entry.duration);
+    const duration = Number.isFinite(seconds) && seconds > 0 ? ` · ${formatDuration(seconds)}` : "";
+    const prefix = `${start + index + 1}. 🎵 `;
+    const room = Math.max(10, 64 - prefix.length - duration.length);
+    const title = String(entry.title || "Nomi topilmadi").replace(/\s+/g, " ");
+    const shortTitle = title.length > room ? title.slice(0, room - 1) + "…" : title;
+    return [{ text: `${prefix}${shortTitle}${duration}`, callback_data: `music:${entry.id}` }];
+  });
+
+  const nav = [];
+  if (safePage > 0) nav.push({ text: "◀️ Oldingi", callback_data: `mpage:${sessionId}:${safePage - 1}` });
+  if (safePage < pages - 1) nav.push({ text: "Keyingi ▶️", callback_data: `mpage:${sessionId}:${safePage + 1}` });
+  if (nav.length) inline_keyboard.push(nav);
+
+  const shownQuery = session.query.length > 60 ? session.query.slice(0, 59) + "…" : session.query;
+  const pageInfo = pages > 1 ? ` (${safePage + 1}/${pages})` : "";
+  return { text: `🎧 “${shownQuery}” bo‘yicha natijalar${pageInfo}. Keraklisini tanlang:`, reply_markup: { inline_keyboard } };
+}
+
+// ====================================================================================
+
+function createSearchSession(query, entries) {
+  if (searchSessions.size >= 500) searchSessions.delete(searchSessions.keys().next().value);
+  const sessionId = randomBytes(4).toString("hex");
+  searchSessions.set(sessionId, { time: Date.now(), query, entries });
+  return sessionId;
+}
+
+async function fetchMusicEntries(searchTerm, cookiesPath) {
+  const run = (cookies) => youtubedl.exec(`ytsearch18:${searchTerm}`, musicSearchOptions(cookies), { timeout: 60000 });
+  let result;
+  try {
+    result = await run(cookiesPath);
+  } catch (error) {
+    if (!cookiesPath) throw error;
+    result = await run(undefined); // cookie sabab bo‘lsa, cookie’siz qayta urinib ko‘ramiz
+  }
+  const data = JSON.parse(result.stdout || "{}");
+  return (data.entries || []).filter((entry) => entry?.id && /^[\w-]{6,20}$/.test(entry.id) && entry.live_status !== "is_live");
+}
+
+async function searchMusic(chatId, query) {
+  const rawQuery = query.trim().slice(0, 150);
+  if (!rawQuery) {
+    await sendText(chatId, "🎵 Qo‘shiq nomi yoki ijrochini yozing. Masalan: /music Sevara Nazarkhan");
+    return;
+  }
+  const searchTerm = cleanMusicQuery(rawQuery);
+  const cacheKey = searchTerm.toLowerCase();
+
+  // 1) Keshda bor bo‘lsa, darhol javob beramiz
+  const cached = searchCache.get(cacheKey);
+  if (cached && Date.now() - cached.time < SEARCH_CACHE_MS) {
+    const sessionId = createSearchSession(rawQuery, cached.entries);
+    const view = musicResultsView(searchSessions.get(sessionId), sessionId, 0);
+    await sendText(chatId, view.text, { reply_markup: view.reply_markup });
+    return;
+  }
+
+  // 2) Haddan tashqari ko‘p qidiruvlardan himoya
+  if (Date.now() - (lastSearchAt.get(chatId) || 0) < SEARCH_COOLDOWN_MS) {
+    await sendText(chatId, "Biroz sekinroq 🙂 Bir necha soniyadan keyin qayta qidiring.");
+    return;
+  }
+  if (activeSearches >= MAX_PARALLEL_SEARCHES) {
+    await sendText(chatId, "Hozir qidiruv band. Birozdan keyin qayta urinib ko‘ring.");
+    return;
+  }
+  lastSearchAt.set(chatId, Date.now());
+
+  activeSearches += 1;
+  let workDir;
+  try {
+    workDir = await mkdtemp(path.join(tmpdir(), "downloader-music-search-"));
+    const waiting = await sendText(chatId, `🔎 “${rawQuery}” bo‘yicha musiqa qidiryapman...`);
+    const showResult = (text, extra = {}) =>
+      telegram("editMessageText", { chat_id: chatId, message_id: waiting.message_id, text, ...extra })
+        .catch(() => sendText(chatId, text, extra));
+
+    let cookiesPath;
+    try {
+      cookiesPath = await writeYouTubeCookies(workDir);
+    } catch {
+      console.warn("YOUTUBE_COOKIES yaroqsiz, qidiruv cookie’siz bajariladi");
+    }
+
+    const entries = await fetchMusicEntries(searchTerm, cookiesPath);
+    const ranked = rankMusicEntries(entries, rawQuery, searchTerm);
+    if (!ranked.length) {
+      await showResult("Bu nom bo‘yicha musiqa topilmadi. Ijrochi va qo‘shiq nomini boshqacha yozib ko‘ring.");
+      return;
+    }
+
+    if (searchCache.size >= 200) searchCache.delete(searchCache.keys().next().value);
+    searchCache.set(cacheKey, { time: Date.now(), entries: ranked });
+    const sessionId = createSearchSession(rawQuery, ranked);
+    const view = musicResultsView(searchSessions.get(sessionId), sessionId, 0);
+    await showResult(view.text, { reply_markup: view.reply_markup });
+  } catch (error) {
+    console.error("Music search failed:", String(error.stderr || error.message || "unknown").slice(0, 400));
+    await sendText(chatId, "Musiqa qidiruvi hozir ishlamadi. Birozdan keyin yana urinib ko‘ring.").catch(() => {});
+  } finally {
+    if (workDir) await rm(workDir, { recursive: true, force: true }).catch(() => {});
+    activeSearches -= 1;
+  }
 }
 
 async function downloadAndSendMusic(chatId, videoId, title) {
@@ -380,6 +525,21 @@ app.post("/webhook", async (req, res) => {
   if (callback) {
     if (!TOKEN) return;
     try {
+      // "Oldingi / Keyingi" tugmalari
+      const pageMatch = String(callback.data || "").match(/^mpage:([a-f0-9]{8}):(\d{1,2})$/);
+      if (pageMatch) {
+        const session = searchSessions.get(pageMatch[1]);
+        if (!session) {
+          await telegram("answerCallbackQuery", { callback_query_id: callback.id, text: "Natijalar eskirgan, qaytadan qidiring." });
+          return;
+        }
+        const view = musicResultsView(session, pageMatch[1], Number(pageMatch[2]));
+        await telegram("editMessageText", { chat_id: callback.message.chat.id, message_id: callback.message.message_id, ...view })
+          .catch((error) => console.warn("Page edit failed:", error.message));
+        await telegram("answerCallbackQuery", { callback_query_id: callback.id }).catch(() => {});
+        return;
+      }
+
       const match = String(callback.data || "").match(/^music:([\w-]{6,20})$/);
       if (!match) {
         await telegram("answerCallbackQuery", { callback_query_id: callback.id, text: "Bu natija yaroqsiz." });
@@ -446,6 +606,14 @@ async function setupWebhook() {
     { command: "help", description: "Botdan foydalanish yo‘riqnomasi" }
   ] });
 }
+
+// Eski kesh va qidiruv sessiyalarini vaqti-vaqti bilan tozalash
+setInterval(() => {
+  const now = Date.now();
+  for (const [key, value] of searchCache) if (now - value.time > SEARCH_CACHE_MS) searchCache.delete(key);
+  for (const [key, value] of searchSessions) if (now - value.time > SEARCH_SESSION_MS) searchSessions.delete(key);
+  for (const [key, value] of lastSearchAt) if (now - value > 60000) lastSearchAt.delete(key);
+}, 5 * 60 * 1000).unref();
 
 app.listen(PORT, () => {
   console.log("Downloader UZ server ishga tushdi:", PORT);
